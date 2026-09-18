@@ -3,6 +3,14 @@ description: "Captive-portal WiFi setup, buffered web logger with crash reports,
 url: "https://github.com/horse-pants/Preflight-IDF"
 repository: "https://github.com/horse-pants/Preflight-IDF.git"
 license: "MIT"
+tags:
+  - wifi
+  - provisioning
+  - setup
+  - ota
+  - logger
+  - webserver
+  - lvgl
 dependencies:
   idf: ">=5.3"
   # 1.13 fails -Werror=stringop-truncation under IDF 6.0's GCC 15; 1.11.x is the verified line.
