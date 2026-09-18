@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>WiFi Setup</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="wifi-setup-style.css">
+    <script src="wifi-setup-theme.js"></script>
+</head>
+<body>
+    <main>
+        <div class="header">
+            <h1>WiFi Setup</h1>
+            <button type="button" class="theme-toggle" onclick="toggleTheme()"></button>
+        </div>
+
+        <div class="card">
+            <div class="scanning" id="scanning">Scanning networks...</div>
+
+            <form action="/save-wifi" method="POST">
+                <label for="network_name">Device Name</label>
+                <input type="text" id="network_name" name="network_name" placeholder="Enter hostname" required>
+
+                <label for="wifi_network">WiFi Network</label>
+                <select id="wifi_network" name="wifi_network" required>
+                    <option value="">Loading...</option>
+                </select>
+
+                <label for="wifi_password">WiFi Password</label>
+                <input type="password" id="wifi_password" name="wifi_password" placeholder="Enter password">
+                <p class="hint" id="password_hint" style="display:none">Password required for new network</p>
+
+                <button type="submit">Save & Restart</button>
+                <button type="button" class="danger" onclick="factoryReset()">Factory Reset</button>
+            </form>
+        </div>
+
+        <nav>
+            <a href="/">Back</a>
+        </nav>
+    </main>
+
+    <script>
+        let originalSettings = { hostName: '', wifiSSID: '', hasPassword: false };
+
+        function fetchSettings() {
+            return fetch('/get-current-settings')
+                .then(r => r.json())
+                .catch(() => null);
+        }
+
+        // 202 = scanning in the background (async servers can't block): poll, bounded.
+        async function fetchNetworks() {
+            const deadline = Date.now() + 20000;
+            while (true) {
+                let res;
+                try {
+                    res = await fetch('/get-networks');
+                } catch (e) {
+                    return null;
+                }
+                if (res.status !== 202) {
+                    return res.ok ? res.text() : null;
+                }
+                if (Date.now() > deadline) return null;
+                await new Promise(r => setTimeout(r, 700));
+            }
+        }
+
+        function splitEscaped(text, delim) {
+            const out = [];
+            let cur = '';
+            for (let i = 0; i < text.length; i++) {
+                const c = text[i];
+                if (c === '\\' && i + 1 < text.length) {
+                    cur += c + text[++i];      // keep the escape for unescapeField
+                } else if (c === delim) {
+                    out.push(cur);
+                    cur = '';
+                } else {
+                    cur += c;
+                }
+            }
+            out.push(cur);
+            return out;
+        }
+
+        function unescapeField(text) {
+            let out = '';
+            for (let i = 0; i < text.length; i++) {
+                if (text[i] === '\\' && i + 1 < text.length) out += text[++i];
+                else out += text[i];
+            }
+            return out;
+        }
+
+        function populateNetworks(data) {
+            const select = document.getElementById('wifi_network');
+            select.innerHTML = '';
+
+            if (data === null) {
+                select.innerHTML = '<option value="">Error loading</option>';
+                return;
+            }
+            if (!data || !data.trim()) {
+                select.innerHTML = '<option value="">No networks found</option>';
+                return;
+            }
+
+            // "SSID|RSSI|secured,...", backslash-escaped: ',' and '|' are legal in an SSID.
+            // A mesh or repeater reports one SSID per access point: list it once, at its strongest.
+            const networks = new Map();
+            splitEscaped(data, ',').forEach(net => {
+                const parts = splitEscaped(net, '|');
+                const ssid = unescapeField(parts[0] || '');
+                const rssi = parseInt(parts[1], 10);
+                const open = parts[2] === '0';
+                const known = networks.get(ssid);
+                if (ssid && (!known || rssi > known.rssi)) networks.set(ssid, { rssi, open });
+            });
+            [...networks.entries()]
+                .sort((a, b) => b[1].rssi - a[1].rssi)
+                .forEach(([ssid, net]) => {
+                    const opt = document.createElement('option');
+                    opt.value = ssid;
+                    opt.dataset.open = net.open ? '1' : '0';
+                    opt.textContent = `${ssid} (${net.rssi} dBm${net.open ? ', open' : ''})`;
+                    select.appendChild(opt);
+                });
+
+            if (originalSettings.wifiSSID && !select.querySelector(`option[value="${CSS.escape(originalSettings.wifiSSID)}"]`)) {
+                const opt = document.createElement('option');
+                opt.value = originalSettings.wifiSSID;
+                opt.textContent = `${originalSettings.wifiSSID} (saved)`;
+                select.insertBefore(opt, select.firstChild);
+            }
+
+            if (originalSettings.wifiSSID) {
+                select.value = originalSettings.wifiSSID;
+            }
+        }
+
+        function applySettings(settings) {
+            if (!settings) return;
+            originalSettings.hostName = settings.networkName || '';
+            originalSettings.wifiSSID = settings.wifiSSID || '';
+            originalSettings.hasPassword = !!settings.hasPassword;
+            if (settings.hasSettings) {
+                document.getElementById('network_name').value = settings.networkName || '';
+            }
+        }
+
+        // A blank password on the saved network keeps the stored one (the device never sends it).
+        function updatePasswordHint() {
+            const select = document.getElementById('wifi_network');
+            const selected = select.value;
+            const option = select.selectedOptions[0];
+            const pw = document.getElementById('wifi_password');
+            const hint = document.getElementById('password_hint');
+            const saved = !!selected && selected === originalSettings.wifiSSID;
+            const open = !!option && option.dataset.open === '1';
+
+            if (saved && originalSettings.hasPassword) {
+                pw.placeholder = '********';
+                pw.required = false;
+                hint.textContent = 'Saved password - leave blank to keep it';
+            } else if (open) {
+                pw.placeholder = 'Open network - no password';
+                pw.required = false;
+                hint.textContent = '';
+            } else {
+                pw.placeholder = 'Enter password';
+                pw.required = !!selected && !saved;
+                hint.textContent = pw.required ? 'Password required for a new network' : '';
+            }
+            hint.style.display = hint.textContent ? 'block' : 'none';
+        }
+
+        function factoryReset() {
+            if (confirm('Reset all settings? Device will restart in AP mode.')) {
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '/factory-reset';
+                const token = document.createElement('input');
+                token.type = 'hidden';
+                token.name = 'confirm';
+                token.value = 'RESET';
+                form.appendChild(token);
+                document.body.appendChild(form);
+                form.submit();
+            }
+        }
+
+        async function init() {
+            // Populate only after settings land, so the saved SSID is preselected.
+            const [settings, networksData] = await Promise.all([fetchSettings(), fetchNetworks()]);
+            applySettings(settings);
+            populateNetworks(networksData);
+            updatePasswordHint();
+            document.getElementById('scanning').style.display = 'none';
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+        document.getElementById('wifi_network').addEventListener('change', updatePasswordHint);
+    </script>
+</body>
+</html>

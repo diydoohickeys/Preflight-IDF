@@ -1,0 +1,31 @@
+#ifndef WIFI_SAVED_HTML_H
+#define WIFI_SAVED_HTML_H
+
+#ifndef PROGMEM
+#define PROGMEM
+#endif
+
+inline constexpr char WIFI_SAVED_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Settings Saved</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="wifi-setup-style.css">
+    <meta http-equiv="refresh" content="3">
+</head>
+<body class="status-page">
+    <main>
+        <h1>Settings Saved</h1>
+
+        <div class="card">
+            <p>Device: <strong>%NETWORK_NAME%</strong></p>
+            <p>WiFi: <strong>%WIFI_NETWORK%</strong></p>
+            <p>Restarting...</p>
+        </div>
+    </main>
+</body>
+</html>
+)rawliteral";
+
+#endif // WIFI_SAVED_HTML_H

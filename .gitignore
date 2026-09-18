@@ -1,0 +1,9 @@
+.pio
+.vscode/
+
+# idf.py output from building examples/*
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old

@@ -1,0 +1,38 @@
+#ifndef FACTORY_RESET_CONFIRM_HTML_H
+#define FACTORY_RESET_CONFIRM_HTML_H
+
+#ifndef PROGMEM
+#define PROGMEM
+#endif
+
+inline constexpr char FACTORY_RESET_CONFIRM_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Factory Reset</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="wifi-setup-style.css">
+</head>
+<body class="status-page danger-page">
+    <main>
+        <h1>Factory Reset</h1>
+
+        <div class="card">
+            <p>This clears the saved WiFi credentials and device name.</p>
+            <p>The device restarts into setup (AP) mode and has to be reconfigured.</p>
+
+            <form action="/factory-reset" method="POST">
+                <input type="hidden" name="confirm" value="RESET">
+                <button type="submit" class="danger">Erase all settings</button>
+            </form>
+        </div>
+
+        <nav>
+            <a href="/setup">Cancel</a>
+        </nav>
+    </main>
+</body>
+</html>
+)rawliteral";
+
+#endif // FACTORY_RESET_CONFIRM_HTML_H

@@ -1,0 +1,26 @@
+name: Build example
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  example:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        idf: [v5.5.1, v6.0.1]
+        target: [esp32, esp32s3]
+    steps:
+      - uses: actions/checkout@v4
+
+      # examples/basic pulls the component in from the repository root and has no LVGL, so
+      # this also proves the headless build.
+      - uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: ${{ matrix.idf }}
+          target: ${{ matrix.target }}
+          path: examples/basic
