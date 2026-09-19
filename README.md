@@ -1,6 +1,6 @@
 # Preflight-IDF
 
-[![Build example](https://github.com/horse-pants/Preflight-IDF/actions/workflows/build.yml/badge.svg)](https://github.com/horse-pants/Preflight-IDF/actions/workflows/build.yml)
+[![Build example](https://github.com/diydoohickeys/Preflight-IDF/actions/workflows/build.yml/badge.svg)](https://github.com/diydoohickeys/Preflight-IDF/actions/workflows/build.yml)
 
 **Preflight** is everything an ESP32 project needs before the interesting part starts: a
 captive portal for WiFi credentials, a buffered logger with a web view and crash reports, an
@@ -31,7 +31,7 @@ layer.
 
 | Setup | Logs | Update |
 |---|---|---|
-| ![The captive-portal setup page](docs/images/setup.png) | ![The log viewer](docs/images/logs.png) | ![The OTA update page](docs/images/update.png) |
+| ![The captive-portal setup page](https://raw.githubusercontent.com/diydoohickeys/Preflight-IDF/main/docs/images/setup.png) | ![The log viewer](https://raw.githubusercontent.com/diydoohickeys/Preflight-IDF/main/docs/images/logs.png) | ![The OTA update page](https://raw.githubusercontent.com/diydoohickeys/Preflight-IDF/main/docs/images/update.png) |
 
 ## Requirements
 
@@ -62,7 +62,7 @@ Add to your project's `main/idf_component.yml`:
 ```yaml
 dependencies:
   esp32_wifi_setup:
-    git: https://github.com/horse-pants/Preflight-IDF.git
+    git: https://github.com/diydoohickeys/Preflight-IDF.git
     version: v1.0.0
 ```
 

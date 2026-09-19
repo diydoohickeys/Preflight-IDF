@@ -1,7 +1,7 @@
-version: "1.0.0"
+version: "1.0.1"
 description: "Captive-portal WiFi setup, buffered web logger with crash reports, OTA update page with rollback and an optional LVGL boot screen for ESP32 projects"
-url: "https://github.com/horse-pants/Preflight-IDF"
-repository: "https://github.com/horse-pants/Preflight-IDF.git"
+url: "https://github.com/diydoohickeys/Preflight-IDF"
+repository: "https://github.com/diydoohickeys/Preflight-IDF.git"
 license: "MIT"
 tags:
   - wifi
