@@ -1,0 +1,6 @@
+dependencies:
+  # Inside the repo this builds against the working tree; the registry strips
+  # override_path when the example is downloaded, so a copy resolves the published version.
+  diydoohickeys/preflight:
+    version: "*"
+    override_path: "../../../"

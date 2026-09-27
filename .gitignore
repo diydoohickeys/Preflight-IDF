@@ -7,3 +7,6 @@ managed_components/
 dependencies.lock
 sdkconfig
 sdkconfig.old
+
+# compote component upload output
+dist/

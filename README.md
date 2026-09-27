@@ -57,13 +57,26 @@ has not does not have to.
 
 ## Installation
 
-Add to your project's `main/idf_component.yml`:
+From the [ESP Component Registry](https://components.espressif.com/components/diydoohickeys/preflight):
+
+```
+idf.py add-dependency "diydoohickeys/preflight^1.0.1"
+```
+
+or add it to your project's `main/idf_component.yml` by hand:
 
 ```yaml
 dependencies:
-  esp32_wifi_setup:
+  diydoohickeys/preflight: "^1.0.1"
+```
+
+To track the repository instead:
+
+```yaml
+dependencies:
+  preflight:
     git: https://github.com/diydoohickeys/Preflight-IDF.git
-    version: v1.0.0
+    version: main
 ```
 
 Then in `sdkconfig.defaults`:
@@ -82,10 +95,13 @@ The repo root **is** the component, so no `path:` is needed.
 `/update`, a 4 MB dual-OTA partition table and crash reporting.
 
 ```
-cd examples/basic
+idf.py create-project-from-example "diydoohickeys/preflight:basic"
+cd basic
 idf.py set-target esp32s3
 idf.py build flash
 ```
+
+From a clone, `cd examples/basic` instead of the first two lines; it builds against the checkout.
 
 ### Headless builds (no display)
 
