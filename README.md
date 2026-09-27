@@ -102,6 +102,8 @@ idf.py build flash
 ```
 
 From a clone, `cd examples/basic` instead of the first two lines; it builds against the checkout.
+Clone into a folder named `preflight` (`git clone https://github.com/diydoohickeys/Preflight-IDF.git preflight`):
+IDF names a local component after its folder.
 
 ### Headless builds (no display)
 

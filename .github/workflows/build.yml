@@ -16,7 +16,11 @@ jobs:
         idf: [v5.5.1, v6.0.1]
         target: [esp32, esp32s3]
     steps:
+      # IDF names a local component after its folder, so the checkout must be called
+      # `preflight` for the example's diydoohickeys/preflight override_path to resolve.
       - uses: actions/checkout@v5
+        with:
+          path: preflight
 
       # examples/basic pulls the component in from the repository root (override_path) and
       # has no LVGL, so this also proves the headless build.
@@ -24,7 +28,7 @@ jobs:
         with:
           esp_idf_version: ${{ matrix.idf }}
           target: ${{ matrix.target }}
-          path: examples/basic
+          path: preflight/examples/basic
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
