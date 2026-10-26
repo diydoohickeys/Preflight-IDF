@@ -63,14 +63,14 @@ has not does not have to.
 From the [ESP Component Registry](https://components.espressif.com/components/diydoohickeys/preflight):
 
 ```
-idf.py add-dependency "diydoohickeys/preflight^1.0.1"
+idf.py add-dependency "diydoohickeys/preflight^1.1.0"
 ```
 
 or add it to your project's `main/idf_component.yml` by hand:
 
 ```yaml
 dependencies:
-  diydoohickeys/preflight: "^1.0.1"
+  diydoohickeys/preflight: "^1.1.0"
 ```
 
 To track the repository instead:
