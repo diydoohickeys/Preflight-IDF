@@ -18,7 +18,7 @@ inline constexpr char FACTORY_RESET_CONFIRM_HTML[] PROGMEM = R"rawliteral(<!DOCT
         <h1>Factory Reset</h1>
 
         <div class="card">
-            <p>This clears the saved WiFi credentials and device name.</p>
+            <p>This clears the saved WiFi credentials, device name and device password.</p>
             <p>The device restarts into setup (AP) mode and has to be reconfigured.</p>
 
             <form action="/factory-reset" method="POST">

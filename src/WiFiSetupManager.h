@@ -14,6 +14,7 @@
 #include "freertos/semphr.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
+#include "ServerHost.h"
 #include <atomic>
 #include <string>
 #include <functional>
@@ -68,6 +69,24 @@ struct WiFiSetupConfig {
     std::string ssidKey = "ssid";
     std::string passwordKey = "password";
     uint16_t webServerPort = 80;
+    // Puts an HTTPS switch on /setup, off until the user turns it on (the device restarts). On, the
+    // pages and every consumer route are served on httpsPort once joined to WiFi, with a device-made
+    // certificate (self-signed, or signed by the user's CA via tools/preflight-certs.ps1) and
+    // webServerPort redirecting to it. The setup portal stays plain HTTP: captive-portal browsers
+    // can't accept a certificate. Needs CONFIG_ESP_HTTPS_SERVER_ENABLE and
+    // CONFIG_MBEDTLS_X509_CREATE_C; falls back to HTTP.
+    bool offerHttps = false;
+    uint16_t httpsPort = 443;
+    // Concurrent connections the server keeps open (HTTPS takes three of them for the port-80
+    // redirect). Each TLS connection holds ~30 KB of mbedTLS buffers, in internal RAM unless
+    // CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: lower this on a board with no PSRAM.
+    // 12 by default: httpd's own 7 lets browser keep-alives squeeze out a consumer's long-lived
+    // WebSocket, and CONFIG_LWIP_MAX_SOCKETS=16 minus httpd's reserved sockets caps it at 13.
+    uint16_t maxOpenSockets = 12;
+    // WiFi modem sleep. Off by default: asleep, the radio wakes only every DTIM beacon (~100 ms),
+    // so every round trip pays up to that — ping swung 5-206 ms at idle, and a TLS handshake plus a
+    // page load is dozens of round trips (10-15 s pages). Turn it on only for a battery device.
+    bool wifiPowerSave = false;
     uint16_t dnsPort = 53;
     uint8_t maxConnectionAttempts = 10;
     uint16_t connectionTimeout = 500;                    // ms per attempt
@@ -108,6 +127,12 @@ public:
 
     // For adding the consumer's own routes
     httpd_handle_t getWebServer() { return _server; }
+    // Whether getWebServer() is the HTTPS server (false in setup mode and on fallback).
+    bool isHttps() const { return _host.isHttps(); }
+
+    // Replaces the status callback; nullptr detaches it. Detach BEFORE destroying the callback
+    // object (a boot screen torn down after boot): a /get-networks rescan still reports through it.
+    void setStatusCallback(WiFiStatusCallback* callback) { _config.statusCallback = callback; }
 
     // Clears the stored settings; the restart happens on a later update().
     void factoryReset();
@@ -124,7 +149,8 @@ private:
 
     esp_netif_t* _staNetif;
     esp_netif_t* _apNetif;
-    httpd_handle_t _server;
+    wifisetup::ServerHost _host;
+    httpd_handle_t _server;  // _host.handle() once started
     int _dnsSocket;
     TaskHandle_t _dnsTask;
     EventGroupHandle_t _wifiEvents;
@@ -168,13 +194,6 @@ private:
     static constexpr size_t PASSWORD_MAX_BYTES = 63;
     static constexpr size_t HOSTNAME_MAX_BYTES = 63;
 
-    // Fits a fully percent-encoded device name + SSID + passphrase while bounding
-    // what one POST can make us allocate.
-    static constexpr size_t MAX_FORM_BODY = 1024;
-    // Each timeout is httpd's recv_wait_timeout (5 s by default).
-    static constexpr int MAX_RECV_TIMEOUTS = 3;
-    static constexpr int64_t FORM_BODY_DEADLINE_MS = 15000;
-
     // DNS: one UDP datagram, plus the fixed answer record appended to it.
     static constexpr int DNS_BUFFER_SIZE = 512;
     static constexpr int DNS_HEADER_SIZE = 12;
@@ -199,12 +218,9 @@ private:
     void superviseFirmware();
     uint32_t getMillis() const;
 
-    static std::string urlDecode(const std::string& in);
     static std::string jsonEscape(const std::string& in);
     static std::string htmlEscape(const std::string& in);
     static std::string listEscape(const std::string& in);
-    static std::string formValue(const std::string& body, const char* key);
-    static bool readFormBody(httpd_req_t* req, std::string& body);
     // A failed scan keeps the previous list but still counts as a fresh result.
     void recordScan(bool succeeded, const std::string& networks = std::string());
     bool getFreshScan(std::string& networks) const;

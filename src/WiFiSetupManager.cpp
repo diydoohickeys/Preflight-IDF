@@ -7,12 +7,19 @@
 #include "html/theme_js.h"
 #include "SameOrigin.h"
 #include "HttpdRoute.h"
+#include "FormBody.h"
+#include "AccessGuard.h"
+#include "DeviceCert.h"
 #include "Logger.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
+#include <algorithm>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+
+using wifisetup::formValue;
+using wifisetup::readFormBody;
 
 namespace {
 
@@ -109,6 +116,7 @@ void WiFiSetupManager::begin() {
     if (!initNvs()) {
         Logger.error("NVS unavailable - settings cannot be stored or read");
     }
+    Access.begin();
 
     if (!initWifi()) {
         Logger.error("WiFi init failed - setup manager inactive");
@@ -145,7 +153,9 @@ void WiFiSetupManager::update() {
         esp_restart();
     }
 
-    if (_staWantsConnection && !_apMode && !isConnected()) {
+    // The backoff gates the connected check, not the other way round: on a hosted radio
+    // (P4 + C6) isConnected() is an RPC costing ~25 ms, too much to pay on every pass.
+    if (_staWantsConnection && !_apMode) {
         uint32_t now = getMillis();
         uint32_t backoff = RECONNECT_BASE_MS;
         for (uint8_t i = 0; i < _reconnectFailures && backoff < RECONNECT_MAX_MS; i++) {
@@ -155,10 +165,12 @@ void WiFiSetupManager::update() {
 
         if (now - _lastReconnectMs >= backoff) {
             _lastReconnectMs = now;
-            if (_reconnectFailures < 255) _reconnectFailures++;
-            Logger.info("Reconnecting to %s (attempt %u)",
-                     _wifiSsid.c_str(), (unsigned)_reconnectFailures);
-            esp_wifi_connect();
+            if (!isConnected()) {
+                if (_reconnectFailures < 255) _reconnectFailures++;
+                Logger.info("Reconnecting to %s (attempt %u)",
+                         _wifiSsid.c_str(), (unsigned)_reconnectFailures);
+                esp_wifi_connect();
+            }
         }
     }
 }
@@ -218,9 +230,11 @@ bool WiFiSetupManager::isInSetupMode() const {
 }
 
 void WiFiSetupManager::factoryReset() {
-    Logger.warning("Factory reset - clearing WiFi settings");
+    Logger.warning("Factory reset - clearing WiFi settings and the device password");
 
     nvsClear();
+    Access.clear();
+    wifisetup::clearDeviceCert();
 
     requestRestart();
 }
@@ -548,6 +562,8 @@ bool WiFiSetupManager::connectToNetwork() {
 
     if (bits & WIFI_CONNECTED_BIT) {
         Logger.info("Connected to WiFi");
+        // Persists across reconnects: the setting belongs to the station, not the association.
+        esp_wifi_set_ps(_config.wifiPowerSave ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
         _apMode = false;
         // Arms update()'s reconnect supervision.
         _staWantsConnection = true;
@@ -599,7 +615,6 @@ void WiFiSetupManager::startAPMode() {
     }
 
     Logger.info("AP Name: %s", _config.defaultAPName.c_str());
-    Logger.info("Password: %s", _config.defaultAPPassword.c_str());
     Logger.info("IP: %s", getIPAddress().c_str());
 }
 
@@ -608,23 +623,23 @@ void WiFiSetupManager::startWebServer() {
         return;
     }
 
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = _config.webServerPort;
+    wifisetup::ServerOptions options;
+    options.httpPort = _config.webServerPort;
+    options.httpsPort = _config.httpsPort;
+    // Never in setup mode: a captive-portal browser can't accept a self-signed certificate.
+    options.https = _config.offerHttps && wifisetup::httpsChosen() && !_apMode;
+    options.hostname = _hostName.empty() ? _config.defaultAPName : _hostName;
     // Shared with the consumer's whole route table, one slot per method+path. Overflow
     // is silent (the last registrations just fail), so the cap is generous.
-    config.max_uri_handlers = 160;
-    config.stack_size = 8192;
-    config.uri_match_fn = httpd_uri_match_wildcard;
-    // The default 7 lets browser keep-alives squeeze out a consumer's long-lived
-    // WebSocket. CONFIG_LWIP_MAX_SOCKETS=16 minus httpd's ~3 reserved caps this at 13;
-    // the LRU purge reclaims the oldest idle socket at the cap.
-    config.max_open_sockets = 12;
-    config.lru_purge_enable = true;
+    options.maxUriHandlers = 176;
+    options.stackSize = 8192;
+    options.maxOpenSockets = _config.maxOpenSockets;
 
-    if (httpd_start(&_server, &config) != ESP_OK) {
-        Logger.error("Failed to start web server");
+    if (!_host.start(options)) {
         return;
     }
+    _server = _host.handle();
+    Access.setHttps(_host.isHttps());
 
     httpd_uri_t setup_uri = wifisetup::route("/setup", HTTP_GET, handleSetupPage, this);
     httpd_uri_t style_uri = wifisetup::route("/wifi-setup-style.css", HTTP_GET, handleStyleCss, this);
@@ -644,6 +659,11 @@ void WiFiSetupManager::startWebServer() {
     httpd_register_uri_handler(_server, &reset_get_uri);
     httpd_register_uri_handler(_server, &reset_post_uri);
 
+    Access.registerEndpoints(_server);
+    if (_config.offerHttps) {
+        wifisetup::registerDeviceCertEndpoints(_server);
+    }
+
     // "/" and the OS captive-portal probe URLs.
     if (_apMode) {
         httpd_uri_t root_uri = wifisetup::route("/", HTTP_GET, handleRoot, this);
@@ -661,14 +681,11 @@ void WiFiSetupManager::startWebServer() {
         httpd_register_uri_handler(_server, &redirect_uri);
     }
 
-    Logger.info("Web server started on port %d", _config.webServerPort);
 }
 
 void WiFiSetupManager::stopWebServer() {
-    if (_server) {
-        httpd_stop(_server);
-        _server = nullptr;
-    }
+    _host.stop();
+    _server = nullptr;
 }
 
 esp_err_t WiFiSetupManager::handleRoot(httpd_req_t* req) {
@@ -686,6 +703,9 @@ esp_err_t WiFiSetupManager::handleCaptiveRedirect(httpd_req_t* req) {
 }
 
 esp_err_t WiFiSetupManager::handleSetupPage(httpd_req_t* req) {
+    if (!Access.allowSetup(req)) {
+        return ESP_OK;
+    }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, SETUP_HTML, strlen(SETUP_HTML));
     return ESP_OK;
@@ -755,6 +775,9 @@ esp_err_t WiFiSetupManager::handleThemeJs(httpd_req_t* req) {
 
 esp_err_t WiFiSetupManager::handleGetNetworks(httpd_req_t* req) {
     auto* self = static_cast<WiFiSetupManager*>(req->user_ctx);
+    if (!Access.allowSetup(req)) {
+        return ESP_OK;
+    }
 
     // Cold on a normal STA boot (the boot scan is lazy). This rescan blocks the shared
     // httpd for ~1-3 s, accepted for a rare user-initiated request.
@@ -771,6 +794,9 @@ esp_err_t WiFiSetupManager::handleGetNetworks(httpd_req_t* req) {
 
 esp_err_t WiFiSetupManager::handleGetCurrentSettings(httpd_req_t* req) {
     auto* self = static_cast<WiFiSetupManager*>(req->user_ctx);
+    if (!Access.allowSetup(req)) {
+        return ESP_OK;
+    }
 
     bool hasSettings = self->nvsHasKey(self->_config.deviceNameKey.c_str());
     std::string networkName = self->nvsGetString(self->_config.deviceNameKey.c_str(), "");
@@ -783,7 +809,9 @@ esp_err_t WiFiSetupManager::handleGetCurrentSettings(httpd_req_t* req) {
     json += ",\"networkName\":\"" + jsonEscape(networkName) + "\"";
     json += ",\"wifiSSID\":\"" + jsonEscape(wifiSSID) + "\"";
     json += ",\"hasPassword\":";
-    json += hasPassword ? "true}" : "false}";
+    json += hasPassword ? "true" : "false";
+    json += ",\"hasDevicePassword\":";
+    json += Access.hasPassword() ? "true}" : "false}";
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json.c_str(), json.length());
@@ -797,6 +825,9 @@ esp_err_t WiFiSetupManager::handleSaveWifi(httpd_req_t* req) {
         wifisetup::sendCrossOriginRefused(req);
         return ESP_FAIL;
     }
+    if (!Access.allowSetup(req)) {
+        return ESP_FAIL;
+    }
 
     std::string body;
     if (!readFormBody(req, body)) {
@@ -806,6 +837,9 @@ esp_err_t WiFiSetupManager::handleSaveWifi(httpd_req_t* req) {
     std::string networkName = formValue(body, "network_name");
     std::string wifiNetwork = formValue(body, "wifi_network");
     std::string wifiPassword = formValue(body, "wifi_password");
+    // Only the first save chooses the device password; later ones change it on /setup's Access card.
+    const bool choosingPassword = !Access.hasPassword();
+    std::string devicePassword = choosingPassword ? formValue(body, "device_password") : std::string();
 
     // mDNS labels are lowercase [a-z0-9-] and a space breaks resolution:
     // "My Device" becomes "my-device".
@@ -835,10 +869,22 @@ esp_err_t WiFiSetupManager::handleSaveWifi(httpd_req_t* req) {
     else if (wifiNetwork.empty())                    reason = "WiFi network is required";
     else if (wifiNetwork.size() > SSID_MAX_BYTES)      reason = "WiFi network name is too long (max 32 bytes)";
     else if (wifiPassword.size() > PASSWORD_MAX_BYTES) reason = "WiFi password is too long (max 63 bytes)";
+    else if (choosingPassword && (devicePassword.size() < AccessGuardClass::MIN_PASSWORD ||
+                                  devicePassword.size() > AccessGuardClass::MAX_PASSWORD))
+        reason = "Device password must be 8-64 characters";
     if (reason) {
         Logger.warning("Rejected WiFi settings: %s", reason);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason);
         return ESP_FAIL;
+    }
+
+    if (choosingPassword) {
+        const bool set = Access.setPassword(devicePassword.c_str());
+        std::fill(devicePassword.begin(), devicePassword.end(), '\0');
+        if (!set) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not save the device password");
+            return ESP_FAIL;
+        }
     }
 
     // The page leaves the field blank to keep the saved password of the saved network.
@@ -878,6 +924,9 @@ esp_err_t WiFiSetupManager::handleFactoryReset(httpd_req_t* req) {
             wifisetup::sendCrossOriginRefused(req);
             return ESP_FAIL;
         }
+        if (!Access.allowSetup(req)) {
+            return ESP_FAIL;
+        }
 
         std::string body;
         if (!readFormBody(req, body)) {
@@ -901,6 +950,9 @@ esp_err_t WiFiSetupManager::handleFactoryReset(httpd_req_t* req) {
         self->factoryReset();
     } else {
         // GET is the confirmation page, never the action.
+        if (!Access.allowSetup(req)) {
+            return ESP_OK;
+        }
         httpd_resp_set_type(req, "text/html");
         httpd_resp_send(req, FACTORY_RESET_CONFIRM_HTML, strlen(FACTORY_RESET_CONFIRM_HTML));
     }
@@ -1085,84 +1137,6 @@ void WiFiSetupManager::processDnsRequest(int socket, uint8_t* buffer, int len,
 
     sendto(socket, response, answer_start, 0,
            (struct sockaddr*)clientAddr, addrLen);
-}
-
-// Reads all of content_len: httpd_req_recv() can return short, and anything unread is
-// left on the socket. On false the 400 is sent; the caller returns ESP_FAIL to close it.
-bool WiFiSetupManager::readFormBody(httpd_req_t* req, std::string& body) {
-    if (req->content_len == 0 || req->content_len > MAX_FORM_BODY) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad request body");
-        return false;
-    }
-
-    body.resize(req->content_len);
-    const int64_t deadlineUs = esp_timer_get_time() + FORM_BODY_DEADLINE_MS * 1000LL;
-    size_t got = 0;
-    int timeouts = 0;
-    while (got < req->content_len) {
-        int r = httpd_req_recv(req, &body[got], req->content_len - got);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-            timeouts++;
-        } else if (r <= 0) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
-            return false;
-        } else {
-            got += (size_t)r;
-            timeouts = 0;
-        }
-        // Consecutive timeouts bound a stalled client; the deadline bounds a trickling one.
-        if (got < req->content_len &&
-            (timeouts >= MAX_RECV_TIMEOUTS || esp_timer_get_time() > deadlineUs)) {
-            httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "Request body timed out");
-            return false;
-        }
-    }
-    return true;
-}
-
-std::string WiFiSetupManager::formValue(const std::string& body, const char* key) {
-    size_t pos = 0;
-    while (pos < body.size()) {
-        size_t amp = body.find('&', pos);
-        if (amp == std::string::npos) amp = body.size();
-        size_t eq = body.find('=', pos);
-        if (eq != std::string::npos && eq < amp && urlDecode(body.substr(pos, eq - pos)) == key) {
-            return urlDecode(body.substr(eq + 1, amp - eq - 1));
-        }
-        pos = amp + 1;
-    }
-    return std::string();
-}
-
-// application/x-www-form-urlencoded: '+' is a space and every reserved byte is %XX.
-std::string WiFiSetupManager::urlDecode(const std::string& in) {
-    auto hexVal = [](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        return -1;
-    };
-
-    std::string out;
-    out.reserve(in.size());
-    for (size_t i = 0; i < in.size(); i++) {
-        char c = in[i];
-        if (c == '+') {
-            out += ' ';
-        } else if (c == '%' && i + 2 < in.size()) {
-            int hi = hexVal(in[i + 1]);
-            int lo = hexVal(in[i + 2]);
-            if (hi >= 0 && lo >= 0) {
-                out += static_cast<char>((hi << 4) | lo);
-                i += 2;
-            } else {
-                out += c;
-            }
-        } else {
-            out += c;
-        }
-    }
-    return out;
 }
 
 std::string WiFiSetupManager::jsonEscape(const std::string& in) {

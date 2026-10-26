@@ -22,8 +22,11 @@ layer.
   the device unreachable until a power cycle.
 - **Logger** with a PSRAM-backed ring buffer, a `/logs` web page (live-tail over a
   consumer-provided WebSocket), `/api/logs` JSON, and previous-boot crash decoding.
-- **OTA** — a `/update` page for firmware and (opt-in) filesystem images, with optional
-  HTTP Basic auth, progress callbacks for LEDs/screens, and automatic rollback.
+- **Device password** — chosen in the setup portal; every page and endpoint sits behind a
+  sign-in (session cookie) or an API key, and the application gates its own routes the same way.
+- **HTTPS** (optional, the user's switch on `/setup`) — a certificate made on the device, port 80 redirecting; `tools/preflight-certs.ps1` signs it with your own CA so browsers trust it.
+- **OTA** — a `/update` page for firmware and (opt-in) filesystem images, behind the device
+  password, with progress callbacks for LEDs/screens and automatic rollback.
 - **Optional LVGL boot screen** showing setup progress, compiled out when LVGL is absent.
 - **Embedded web assets** — no SPIFFS/LittleFS partition needed to serve the UI.
 
@@ -141,8 +144,11 @@ and the reconnect backoff. Without it a saved configuration never reboots into e
 
 With no stored credentials the device starts an AP named by `defaultAPName`. Join it, and
 the captive portal opens the setup page (or browse to `192.168.4.1/setup`). Enter a device
-name and pick a network; the device saves, restarts, and comes up on your WiFi at
-`<device-name>.local`.
+name, pick a network and choose the **device password**; the device saves, restarts, and comes
+up on your WiFi at `<device-name>.local`, where every page asks you to sign in.
+
+`defaultAPPassword` is only the setup hotspot's WiFi key. It is not a login: the device
+password is chosen on that first visit, so there is no default one to change.
 
 ## Configuration
 
@@ -237,18 +243,18 @@ the ELF format. It is a no-op otherwise, so it is safe to call unconditionally.
 #include "OTAManager.h"
 
 OTAManager ota;
-ota.begin(wifiSetup.getWebServer(), "admin", "secret");   // "" , "" = no auth
+ota.begin(wifiSetup.getWebServer(), "");   // "" = firmware only (see below)
 ota.setScreenProgressCallback([](uint8_t pct, OTAManager::Stage stage) { /* ... */ });
 
 // in the main loop
 ota.loop();     // performs the reboot after a successful update
 ```
 
-Browse to `http://<device>/update`. When a username and password are set, **both**
-`/update` and the upload endpoint require HTTP Basic auth, and the check runs before a single
+Browse to `http://<device>/update`. **Both** `/update` and the upload endpoint require the
+device password (a signed-in browser or the API key), and the check runs before a single
 upload byte is read. One upload runs at a time; a second one gets 409.
 
-🚨 **Filesystem updates are a raw overwrite of the named partition.** The fourth argument to
+🚨 **Filesystem updates are a raw overwrite of the named partition.** The second argument to
 `begin()` is the partition label and defaults to `"spiffs"`. **Pass `""` whenever that
 partition holds user data rather than an uploadable image** — the upload then refuses
 `type=filesystem` with a 400, and the page hides the Filesystem card entirely. One
@@ -272,10 +278,42 @@ connecting) — that path is in ROM and always available.
 ## Factory reset
 
 `GET /factory-reset` serves a confirmation page; the reset itself is a POST carrying a
-fixed confirmation token, so following a plain link cannot wipe the device. The token is not
-a secret: anything that can reach the device on the network can reset it.
-`WiFiSetupManager::factoryReset()` does the same from code (it clears NVS and
-schedules the restart for the next `update()`).
+fixed confirmation token, so following a plain link cannot wipe the device. Both need the
+device password. `WiFiSetupManager::factoryReset()` does the same from code (it clears the
+WiFi settings and the device password, and schedules the restart for the next `update()`).
+It is the only way back from a forgotten password, so a device with a button or a touch
+screen should offer it there; otherwise erase the flash over USB.
+
+## Device password
+
+`AccessGuard` (the global `Access`) guards every Preflight page and endpoint. It is chosen
+in the setup portal on the first save, and changed later on `/setup`, which also shows the
+API key and a *Sign out everywhere* button.
+
+- **Browsers** sign in at `/login` and get one session cookie (`HttpOnly`, `SameSite=Lax`,
+  a year), which survives reboots and OTA. All browsers share the token, so signing out — or
+  changing the password — signs every browser out.
+- **Scripts** send `Authorization: Bearer <api key>`; regenerating the key on `/setup`
+  revokes the old one.
+- **Until a password exists** (a device that has not been through setup), the setup routes
+  are open — reachable only by joining the setup hotspot — and everything else is refused.
+- The password is stored as PBKDF2-HMAC-SHA256 (10 000 iterations, random salt). A sign-in
+  costs a few hundred milliseconds of the server task; after five wrong passwords in a row,
+  one attempt is allowed per 30 s.
+
+Gate your own handlers with `allow()`, which sends the refusal itself — a page navigation is
+redirected to `/login?next=…`, anything else gets a 401 JSON body:
+
+```cpp
+static esp_err_t myStatusHandler(httpd_req_t* req) {
+    if (!Access.allow(req)) return ESP_OK;   // ESP_FAIL if the request body is unread
+    // ...
+}
+```
+
+`isAuthorized(req)` checks without responding, for a WebSocket handshake. A browser never
+sends a `SameSite=Lax` cookie on another site's WebSocket handshake, so checking the session
+there also stops a page elsewhere from driving the device.
 
 ## Sharing the web server
 
@@ -288,9 +326,70 @@ httpd_uri_t status = { .uri = "/api/status", .method = HTTP_GET,
 httpd_register_uri_handler(wifiSetup.getWebServer(), &status);
 ```
 
-The server is configured with generous limits (160 URI handlers, 12 open sockets) because
+Gate each one with `Access.allow(req)` (see *Device password*).
+
+The server is configured with generous limits (176 URI handlers, 12 open sockets) because
 the consumer's whole route table shares it. Overflow is silent — the last handlers
 registered simply fail — so raise `max_uri_handlers` if a large application runs out.
+
+## HTTPS
+
+The server is plain HTTP by default, as ESPHome, Tasmota and WLED are: on a home network the
+device password is the protection. `config.offerHttps = true` adds an HTTPS switch to `/setup`'s
+Access card, off until the user turns it on (the device restarts; the choice is kept in NVS). On,
+every page and route is served over TLS on `httpsPort` (443) once the device is on WiFi,
+`webServerPort` (80) redirects to it, and the session cookie becomes `Secure`. The setup portal
+stays plain HTTP, because a captive-portal browser can't accept a certificate. The certificate is
+self-signed ECDSA P-256 for `<host>` and `<host>.local`, made on the device the first time (a few
+hundred ms) and kept in NVS; it's made afresh when the hostname changes. If it can't be made, the server falls back to HTTP and
+says so in the log. `isHttps()` reports which.
+
+Each TLS connection holds about 30 KB of mbedTLS buffers. `maxOpenSockets` (12) caps the open connections; on a board without PSRAM, or without `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, lower it (5 = two TLS connections plus the redirect).
+
+Needs, in `sdkconfig.defaults`:
+
+```
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+CONFIG_MBEDTLS_X509_CREATE_C=y            # certificate writing
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y       # TLS buffers in PSRAM...
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y           # ...and freed between records
+```
+
+In HTTPS mode the main server gets three fewer sockets, which the redirect server uses, so the
+pair draws the same total from `CONFIG_LWIP_MAX_SOCKETS`. The certificate's private key sits in
+NVS — pair HTTPS with NVS encryption (`CONFIG_NVS_ENCRYPTION=y`,
+`CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y`, a free eFuse key block in
+`CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID`; the first boot burns a random key there, which can't be undone).
+
+A WebSocket on the shared server is gated in its URI's `ws_pre_handshake_cb` with
+`Access.isAuthorized()`, which needs `CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y`. The `/logs`
+page connects with `wss://` under HTTPS.
+
+### A certificate your browsers trust
+
+A self-signed certificate makes every browser warn, and a browser won't cache anything from a
+site whose certificate it doesn't trust, so every page load is a full fetch and every new
+connection a refused-then-retried handshake. `tools/preflight-certs.ps1` (PowerShell 7, on
+Windows, macOS or Linux) fixes that with a certificate authority that lives only on your
+computer:
+
+```powershell
+./tools/preflight-certs.ps1 -Device mydevice          # first run also makes and trusts the CA
+./tools/preflight-certs.ps1 -Broker homeassistant.local, 192.168.1.10   # an MQTT broker's certificate
+./tools/preflight-certs.ps1 -Trust -CaFile ca.crt     # trust the CA on another computer
+```
+
+Turn HTTPS on at `/setup` first. The script fetches a signing request for the device's own key (the key never leaves the
+device), signs it for `<host>`, `<host>.local` and the device's address, uploads it with the CA,
+and waits for the device to restart serving it. It needs the API key from `/setup`
+(`-ApiKey`, `$env:PREFLIGHT_API_KEY`, or a prompt). The CA lives in `~/.preflight-ca`: share
+`ca.crt` with other computers and phones, keep `ca.key` private and backed up. Device
+certificates last 825 days; re-run `-Device` to renew, or after a hostname change.
+
+The device keeps the CA too, as the trust anchor for its own outbound TLS:
+`wifisetup::loadTrustedCa()` returns it, for example as an MQTT client's
+`broker.verification.certificate`. `/setup` shows which certificate is served and can go back
+to self-signed.
 
 ## Endpoints provided
 
@@ -298,18 +397,31 @@ registered simply fail — so raise `max_uri_handlers` if a large application ru
 |---|---|
 | `GET /setup` | Configuration page |
 | `GET /get-networks` | Scanned networks. A stale cache (over 15 s) scans inline, holding the request for 1–3 s; in setup mode the boot scan is served as-is (the AP-only radio cannot scan). |
-| `GET /get-current-settings` | Stored device name and SSID, and whether a password is stored (never the password), as JSON |
-| `POST /save-wifi` | Validate, save and restart (400 with a reason on bad input). A blank password for the already-saved network keeps the stored one. |
+| `GET /get-current-settings` | Stored device name and SSID, whether a WiFi password is stored (never the password) and whether a device password exists, as JSON |
+| `POST /save-wifi` | Validate, save and restart (400 with a reason on bad input). A blank password for the already-saved network keeps the stored one. The first save also takes `device_password`. |
 | `GET /factory-reset` | Confirmation page |
 | `POST /factory-reset` | Perform the reset (requires the confirmation token) |
 | `GET /wifi-setup-style.css`, `GET /wifi-setup-theme.js` | Themed assets |
 | `GET /update`, `POST /ota/upload` | OTA (when `OTAManager` is used) |
 | `GET /logs`, `GET /api/logs`, `POST /api/logs/clear` | Logger (when registered) |
+| `GET /login`, `POST /login` | Sign-in page; `password` form field → session cookie (401 wrong, 429 locked out) |
+| `POST /logout` | Sign every browser out |
+| `GET /api/access` | The API key |
+| `POST /api/access/password` | Change the password (`current`, `new`) |
+| `POST /api/access/api-key` | Regenerate the API key |
+| `POST /api/access/https` | Turn HTTPS on or off (`enabled`); restarts the device. With `offerHttps` only, as are the four below |
+| `GET /api/access/csr` | A signing request for the device's key, with its hostname and address |
+| `GET /api/access/certificate` | The served certificate: subject, issuer, expiry, whether CA-signed |
+| `POST /api/access/certificate` | Install a CA-signed certificate (`cert`, `ca`, PEM); restarts the device |
+| `POST /api/access/certificate/reset` | Back to self-signed; restarts the device |
 
-Every state-changing POST (`/save-wifi`, `/factory-reset`, `/ota/upload`, `/api/logs/clear`)
-refuses a cross-site request with **403**: a browser's `Origin` (or `Referer`) must match the
-`Host` it addressed. Tools and scripts send neither header and are unaffected. This stops a
-web page from driving the device through the user's browser; it is not authentication.
+Everything except the themed assets, `/login` and the captive-portal probes needs the device
+password (the setup routes only once one exists).
+
+Every state-changing POST (`/save-wifi`, `/factory-reset`, `/ota/upload`, `/api/logs/clear`,
+`/login`, `/logout`, `/api/access/*`) also refuses a cross-site request with **403**: a
+browser's `Origin` (or `Referer`) must match the `Host` it addressed. Tools and scripts send
+neither header and are unaffected.
 
 In AP mode the captive-portal probe URLs (`/generate_204`, `/hotspot-detect.html`,
 `/connecttest.txt`, `/fwlink`, `/redirect`) and `/` also redirect to `/setup`. They are

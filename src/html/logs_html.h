@@ -145,7 +145,7 @@ inline constexpr char LOGS_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
         // /ws is consumer-provided; the flag below is Logger's enableWebSocket.
         // Never spell a substitution marker in a comment - it gets substituted too.
         if (%LOG_WS%) {
-        const ws = new WebSocket('ws://' + location.hostname + '/ws');
+        const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
         ws.onmessage = function(e) {
             try {
                 const data = JSON.parse(e.data);

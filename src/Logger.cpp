@@ -1,6 +1,7 @@
 #include "Logger.h"
 #include "SameOrigin.h"
 #include "HttpdRoute.h"
+#include "AccessGuard.h"
 #include "html/logs_html.h"
 #include <cstdio>
 #include <cstring>
@@ -73,6 +74,15 @@ void LoggerClass::begin(size_t maxEntries, bool enableSerial, bool enableWebSock
     if (_mutex == nullptr) {
         _mutex = xSemaphoreCreateMutex();
     }
+
+#if defined(ARDUINO) && ARDUINO_USB_CDC_ON_BOOT
+    // USB CDC waits up to 20 x the TX timeout per write while the host has the port open but
+    // isn't reading it - 2 s a line at the default, on whichever task logged. A line nobody is
+    // reading is dropped instead; the buffer and /logs still have it.
+    if (enableSerial) {
+        Serial.setTxTimeoutMs(0);
+    }
+#endif
 
     info("Logger started, buffering %u entries", (unsigned)maxEntries);
 }
@@ -153,6 +163,14 @@ void LoggerClass::error(const std::string& message) {
     addEntry(LOG_ERROR, message.c_str());
 }
 
+#ifdef ARDUINO
+void LoggerClass::log(LogLevel level, const String& message) { addEntry(level, message.c_str()); }
+void LoggerClass::debug(const String& message) { addEntry(LOG_DEBUG, message.c_str()); }
+void LoggerClass::info(const String& message) { addEntry(LOG_INFO, message.c_str()); }
+void LoggerClass::warning(const String& message) { addEntry(LOG_WARNING, message.c_str()); }
+void LoggerClass::error(const String& message) { addEntry(LOG_ERROR, message.c_str()); }
+#endif
+
 void LoggerClass::addEntry(LogLevel level, const char* message) {
     if (level < _minLevel) {
         return;
@@ -226,6 +244,24 @@ std::vector<LogEntry> LoggerClass::getEntries(size_t maxEntries) const {
     return snapshot;
 }
 
+std::string LoggerClass::liveTailJson(LogLevel level, uint32_t timestamp, const char* message) const {
+    std::string entry;
+    appendEntryJson(entry, timestamp, level, message);
+    std::string out = "{\"type\":\"log\",\"color\":\"";
+    out += getLevelColor(level);
+    out += "\",";
+    out.append(entry, 1, std::string::npos);  // entry without its opening brace
+    return out;
+}
+
+#ifdef ARDUINO
+// Serial, not ESP_LOG: with ARDUINO_USB_CDC_ON_BOOT the console UART is not the port the user watches.
+void LoggerClass::printToSerial(LogLevel level, const char* message) {
+    const uint32_t ms = getMillis();
+    Serial.printf("[%lu.%03lus] [%s] %s\n", (unsigned long)(ms / 1000), (unsigned long)(ms % 1000),
+                  getLevelString(level), message);
+}
+#else
 void LoggerClass::printToSerial(LogLevel level, const char* message) {
     switch (level) {
         case LOG_DEBUG:
@@ -245,6 +281,7 @@ void LoggerClass::printToSerial(LogLevel level, const char* message) {
             break;
     }
 }
+#endif
 
 const char* LoggerClass::getLevelString(LogLevel level) const {
     switch (level) {
@@ -627,6 +664,9 @@ static size_t logWindowFromQuery(httpd_req_t* req) {
 // Out of memory mid-stream: ESP_FAIL closes the socket, so the client sees a truncated response
 // instead of a complete-looking one, and no exception reaches httpd's C code.
 esp_err_t LoggerClass::handleLogsPage(httpd_req_t* req) {
+    if (!Access.allow(req)) {
+        return ESP_OK;
+    }
     httpd_resp_set_type(req, "text/html");
     try {
         Logger.streamLogsHtml(req, logWindowFromQuery(req));
@@ -637,6 +677,9 @@ esp_err_t LoggerClass::handleLogsPage(httpd_req_t* req) {
 }
 
 esp_err_t LoggerClass::handleLogsJson(httpd_req_t* req) {
+    if (!Access.allow(req)) {
+        return ESP_OK;
+    }
     httpd_resp_set_type(req, "application/json");
     try {
         Logger.streamLogsJson(req, logWindowFromQuery(req));
@@ -649,6 +692,9 @@ esp_err_t LoggerClass::handleLogsJson(httpd_req_t* req) {
 esp_err_t LoggerClass::handleLogsClear(httpd_req_t* req) {
     if (!wifisetup::isSameOrigin(req)) {
         return wifisetup::sendCrossOriginRefused(req);
+    }
+    if (!Access.allow(req)) {
+        return ESP_OK;
     }
     Logger.clear();
     const char* response = "{\"status\":\"success\",\"message\":\"Logs cleared\"}";

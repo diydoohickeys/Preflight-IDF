@@ -1,7 +1,8 @@
 # Logger
 
-A buffered logger for ESP-IDF: writes through `ESP_LOG*` to the console, keeps recent
-entries in a PSRAM-backed ring buffer, and serves them over HTTP.
+A buffered logger: writes to the console (`ESP_LOG*` in the IDF build, `Serial` in the Arduino
+build), keeps recent entries in a PSRAM-backed ring buffer, and serves them over HTTP. The same
+source file serves both builds.
 
 ## Quick start
 
@@ -23,7 +24,7 @@ Logger.registerEndpoints(server);   // an httpd_handle_t
 | Argument | |
 |---|---|
 | `maxEntries` | Entries to buffer. **0 disables buffering** — output still reaches the console and the output callback, and `/logs` serves an empty list. |
-| `enableSerial` | Mirror to `ESP_LOG*`. Default true. |
+| `enableSerial` | Mirror to the console (`ESP_LOG*`, or `Serial` under Arduino). Default true. |
 | `enableWebSocket` | Whether the `/logs` page tries to live-tail (see below). Default true. |
 
 ## Levels
@@ -32,7 +33,7 @@ Logger.registerEndpoints(server);   // an httpd_handle_t
 (default `LOG_INFO`). A filtered call returns before formatting, so a suppressed
 `debug()` costs one comparison — it does not format a string and throw it away.
 
-Both a printf form and a `std::string` form exist for every level:
+A printf form and a `std::string` form exist for every level (plus `String` under Arduino):
 
 ```cpp
 Logger.debug("value=%d", x);
@@ -69,13 +70,18 @@ reads the log, including in a downloaded copy. `droppedCount()` returns the raw 
 
 ### Live tail
 
-The `/logs` page can follow a WebSocket at `/ws`. **This library does not register `/ws`** —
-a consumer provides it, and is expected to broadcast `{"type":"log", …}` frames. In a build
-with no such endpoint, pass `enableWebSocket=false` so the page does not report a failed
-connect against a socket that does not exist.
+The `/logs` page can follow a WebSocket at `/ws` (`wss://` when the page is HTTPS). **This
+library does not register `/ws`** — a consumer provides it and forwards lines to it:
 
-The Arduino sister adds `attachWebSocket()` and a WebSocket parameter on
-`registerEndpoints()`, as they take ESPAsyncWebServer types; the rest of the API is identical.
+```cpp
+Logger.setOutputCallback([](LogLevel level, uint32_t ts, const char* msg) {
+    const std::string line = Logger.liveTailJson(level, ts, msg);   // {"type":"log",…}
+    // copy it and send to every /ws client from the server task (httpd_queue_work)
+});
+```
+
+In a build with no such endpoint, pass `enableWebSocket=false` so the page does not report a
+failed connect against a socket that does not exist.
 
 ## Reading entries in code
 

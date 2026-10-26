@@ -2,6 +2,7 @@
 #include "Logger.h"
 #include "SameOrigin.h"
 #include "HttpdRoute.h"
+#include "AccessGuard.h"
 #include "html/ota_html.h"  // generated from extras/html_source/ota.html by extras/convert_html.py
 #include <cstring>
 #include <cstdio>
@@ -40,45 +41,7 @@ OTAManager::~OTAManager() {
     }
 }
 
-// Not mbedtls: that costs an extra REQUIRES, and its base64.h path differs between IDF 5 and 6.
-static std::string base64Encode(const std::string& in) {
-    static const char* kAlphabet =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    std::string out;
-    out.reserve(((in.size() + 2) / 3) * 4);
-
-    size_t i = 0;
-    while (i + 2 < in.size()) {
-        uint32_t v = ((uint32_t)(unsigned char)in[i] << 16) |
-                     ((uint32_t)(unsigned char)in[i + 1] << 8) |
-                     ((uint32_t)(unsigned char)in[i + 2]);
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-        out += kAlphabet[(v >> 6) & 0x3F];
-        out += kAlphabet[v & 0x3F];
-        i += 3;
-    }
-
-    const size_t rem = in.size() - i;
-    if (rem == 1) {
-        uint32_t v = (uint32_t)(unsigned char)in[i] << 16;
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-        out += "==";
-    } else if (rem == 2) {
-        uint32_t v = ((uint32_t)(unsigned char)in[i] << 16) |
-                     ((uint32_t)(unsigned char)in[i + 1] << 8);
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-        out += kAlphabet[(v >> 6) & 0x3F];
-        out += '=';
-    }
-
-    return out;
-}
-
-bool OTAManager::begin(httpd_handle_t server, const char* username, const char* password, const char* partitionLabel) {
+bool OTAManager::begin(httpd_handle_t server, const char* partitionLabel) {
     if (_initialized) {
         return true;
     }
@@ -89,21 +52,13 @@ bool OTAManager::begin(httpd_handle_t server, const char* username, const char* 
     }
 
     _server = server;
-    _username = username ? username : "";
-    _password = password ? password : "";
     _partitionLabel = partitionLabel ? partitionLabel : "spiffs";
-
-    _expectedAuth.clear();
-    if (!_username.empty() && !_password.empty()) {
-        _expectedAuth = base64Encode(_username + ":" + _password);
-    }
 
     setupOTAEndpoints();
 
-    Logger.info("OTA Manager initialized (filesystem updates: %s, auth: %s)",
+    Logger.info("OTA Manager initialized (filesystem updates: %s)",
                 _partitionLabel.empty() ? "DISABLED"
-                                        : ("partition '" + _partitionLabel + "'").c_str(),
-                _expectedAuth.empty() ? "none" : "basic");
+                                        : ("partition '" + _partitionLabel + "'").c_str());
     _initialized = true;
     return true;
 }
@@ -141,6 +96,29 @@ void OTAManager::setRefreshCallback(RefreshCallback callback) {
 
 void OTAManager::setAutoReboot(bool enable) {
     _autoReboot = enable;
+}
+
+void OTAManager::setAppSlots(std::vector<std::string> labels) {
+    _appSlots = std::move(labels);
+}
+
+void OTAManager::addImageSlot(const char* label, const char* projectName) {
+    _imageSlots.emplace_back(label ? label : "", projectName ? projectName : "");
+}
+
+const esp_partition_t* OTAManager::firmwareTarget() const {
+    if (_appSlots.empty()) {
+        return esp_ota_get_next_update_partition(nullptr);
+    }
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    for (const std::string& label : _appSlots) {
+        const esp_partition_t* part =
+            esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, label.c_str());
+        if (part && (!running || part->address != running->address)) {
+            return part;
+        }
+    }
+    return nullptr;
 }
 
 void OTAManager::setupOTAEndpoints() {
@@ -213,8 +191,8 @@ static bool parseBoundary(httpd_req_t* req, char* out, size_t outLen) {
 esp_err_t OTAManager::handleUpdatePage(httpd_req_t* req) {
     auto* self = static_cast<OTAManager*>(req->user_ctx);
 
-    if (self && !self->authenticate(req)) {
-        return ESP_FAIL;
+    if (!Access.allow(req)) {
+        return ESP_OK;
     }
 
     httpd_resp_set_type(req, "text/html");
@@ -239,43 +217,13 @@ esp_err_t OTAManager::handleUpdatePage(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// Compares against the pre-encoded credential rather than decoding attacker-controlled input.
-bool OTAManager::authenticate(httpd_req_t* req) {
-    if (_username.empty() || _password.empty()) {
-        return true;
-    }
-
-    bool ok = false;
-    char* header = nullptr;
-    size_t len = httpd_req_get_hdr_value_len(req, "Authorization");
-    if (len > 0 && len < 512) {
-        header = (char*)malloc(len + 1);
-        if (header && httpd_req_get_hdr_value_str(req, "Authorization", header, len + 1) == ESP_OK) {
-            const char* kPrefix = "Basic ";
-            if (strncmp(header, kPrefix, strlen(kPrefix)) == 0) {
-                const char* got = header + strlen(kPrefix);
-                while (*got == ' ') got++;
-                ok = (_expectedAuth == got);
-            }
-        }
-    }
-    free(header);
-
-    if (!ok) {
-        httpd_resp_set_status(req, "401 Unauthorized");
-        httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"OTA\"");
-        httpd_resp_send(req, "Unauthorized", HTTPD_RESP_USE_STRLEN);
-    }
-    return ok;
-}
-
 // Every refusal before the body is read returns ESP_FAIL, so httpd closes the socket instead of draining it.
 esp_err_t OTAManager::handleOTAUpload(httpd_req_t* req) {
     auto* self = static_cast<OTAManager*>(req->user_ctx);
 
     // Before any body byte is read, so an unauthenticated request never reaches esp_ota_write().
-    if (!self->authenticate(req)) {
-        Logger.warning("OTA: upload rejected - authentication required");
+    if (!Access.allow(req)) {
+        Logger.warning("OTA: upload rejected - sign in required");
         return ESP_FAIL;
     }
 
@@ -312,10 +260,28 @@ esp_err_t OTAManager::handleOTAUpload(httpd_req_t* req) {
 
     char query[64] = {0};
     bool isFilesystem = false;
+    char slotLabel[17] = {0};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         char param[16];
         if (httpd_query_key_value(query, "type", param, sizeof(param)) == ESP_OK) {
             isFilesystem = (strcmp(param, "filesystem") == 0);
+        }
+        if (httpd_query_key_value(query, "slot", slotLabel, sizeof(slotLabel)) != ESP_OK) {
+            slotLabel[0] = '\0';
+        }
+    }
+    const std::string* imageProject = nullptr;
+    if (slotLabel[0] && !isFilesystem) {
+        for (const auto& slot : self->_imageSlots) {
+            if (slot.first == slotLabel) {
+                imageProject = &slot.second;
+                break;
+            }
+        }
+        if (!imageProject) {
+            Logger.warning("OTA: upload refused - '%s' is not an image slot", slotLabel);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown image slot");
+            return ESP_FAIL;
         }
     }
 
@@ -337,7 +303,9 @@ esp_err_t OTAManager::handleOTAUpload(httpd_req_t* req) {
     // Any data subtype: the table may declare the label as littlefs rather than spiffs.
     const esp_partition_t* target = isFilesystem
         ? esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, self->_partitionLabel.c_str())
-        : esp_ota_get_next_update_partition(nullptr);
+        : imageProject
+            ? esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, slotLabel)
+            : self->firmwareTarget();
     if (!target) {
         const char* msg = isFilesystem ? "Filesystem partition not found" : "No OTA partition";
         Logger.error("OTA: upload rejected - %s", msg);
@@ -565,6 +533,15 @@ esp_err_t OTAManager::handleOTAUpload(httpd_req_t* req) {
             Logger.error("OTA: esp_ota_end failed: %s (image invalid, truncated, or corrupt)", esp_err_to_name(err));
             snprintf(failMsg, sizeof(failMsg), "Firmware image rejected: %s", esp_err_to_name(err));
             success = false;
+        } else if (imageProject) {
+            esp_app_desc_t desc;
+            if (esp_ota_get_partition_description(target, &desc) != ESP_OK ||
+                strncmp(desc.project_name, imageProject->c_str(), sizeof(desc.project_name)) != 0) {
+                Logger.error("OTA: '%s' takes a %s image - rejected", target->label, imageProject->c_str());
+                snprintf(failMsg, sizeof(failMsg), "Not a %s image", imageProject->c_str());
+                esp_partition_erase_range(target, 0, target->erase_size);
+                success = false;
+            }
         } else {
             err = esp_ota_set_boot_partition(target);
             if (err != ESP_OK) {

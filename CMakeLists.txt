@@ -4,6 +4,11 @@ idf_component_register(
         "src/WiFiSetupBootUI.cpp"
         "src/OTAManager.cpp"
         "src/Logger.cpp"
+        "src/AccessGuard.cpp"
+        "src/AccessGuardHttp.cpp"
+        "src/DeviceCert.cpp"
+        "src/DeviceCertHttp.cpp"
+        "src/ServerHost.cpp"
     INCLUDE_DIRS "src"
     REQUIRES
         mdns
@@ -17,6 +22,8 @@ idf_component_register(
         app_update
         esp_timer
         espcoredump     # Logger::reportLastCrash
+        mbedtls         # AccessGuard password hashing, the device certificate
+        esp_https_server
 )
 
 # LVGL only when the project has it (by either name the component manager gives it); without

@@ -8,6 +8,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string>
+#include <utility>
+#include <vector>
 #include <functional>
 
 class OTAManager {
@@ -34,10 +36,10 @@ public:
     OTAManager(const OTAManager&) = delete;
     OTAManager& operator=(const OTAManager&) = delete;
 
-    // Registers GET /update and POST /ota/upload; both require basic auth unless username or password is empty.
+    // Registers GET /update and POST /ota/upload, both behind the device password (AccessGuard).
     // partitionLabel "" refuses filesystem uploads (400). Use it whenever that partition holds user data:
     // the upload is a raw overwrite with no confirmation and no undo.
-    bool begin(httpd_handle_t server, const char* username = "", const char* password = "", const char* partitionLabel = "spiffs");
+    bool begin(httpd_handle_t server, const char* partitionLabel = "spiffs");
 
     // Call regularly; performs the reboot after a successful update.
     void loop();
@@ -49,6 +51,15 @@ public:
     void setRefreshCallback(RefreshCallback callback);
     // Default true: reboot 2 s after a successful update.
     void setAutoReboot(bool enable);
+    // Firmware uploads go only to these app partitions (by label), never the running one: the first
+    // listed that isn't running. Empty (the default) = IDF's next OTA slot. Set it when the table has
+    // an app slot an upload must never overwrite (an extra image booted by handoff).
+    void setAppSlots(std::vector<std::string> labels);
+    // POST /ota/upload?slot=<label> writes an app image into that partition and does NOT boot it:
+    // for a second image the firmware boots itself by handoff. The image's project name must be
+    // `projectName`; anything else is rejected and the slot left unbootable. Unregistered labels
+    // are refused.
+    void addImageSlot(const char* label, const char* projectName);
 
     Stage getCurrentStage() const { return _currentStage; }
     uint8_t getCurrentProgress() const { return _currentProgress; }
@@ -65,10 +76,9 @@ private:
     bool _autoReboot;
     bool _rebootRequested;
     uint32_t _rebootTime;
-    std::string _username;
-    std::string _password;
-    std::string _expectedAuth;   // base64("user:pass")
     std::string _partitionLabel;
+    std::vector<std::string> _appSlots;
+    std::vector<std::pair<std::string, std::string>> _imageSlots;  // label -> project name
 
     esp_ota_handle_t _otaHandle;
     const esp_partition_t* _updatePartition;
@@ -84,7 +94,7 @@ private:
     bool _uploadRouteRegistered;
 
     void setupOTAEndpoints();
-    bool authenticate(httpd_req_t* req);
+    const esp_partition_t* firmwareTarget() const;
     uint32_t getMillis() const { return (uint32_t)(esp_timer_get_time() / 1000); }
 
     static constexpr size_t UPLOAD_CHUNK = 4096;

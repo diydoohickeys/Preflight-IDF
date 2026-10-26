@@ -16,6 +16,7 @@ FILE_MAPPINGS = {
     "ota.html": ("ota_html.h", "OTA_HTML", "OTA_HTML_H"),
     "style.css": ("style_css.h", "STYLE_CSS", "STYLE_CSS_H"),
     "theme.js": ("theme_js.h", "THEME_JS", "THEME_JS_H"),
+    "login.html": ("login_html.h", "LOGIN_HTML", "LOGIN_HTML_H"),
 }
 
 # `inline constexpr`, not `const`: a namespace-scope const has internal linkage, so each including TU gets its own copy in flash.

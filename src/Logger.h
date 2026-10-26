@@ -1,5 +1,8 @@
 #pragma once
 
+#ifdef ARDUINO
+#include <Arduino.h>
+#endif
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_http_server.h"
@@ -84,6 +87,18 @@ public:
     void info(const std::string& message);
     void warning(const std::string& message);
     void error(const std::string& message);
+#ifdef ARDUINO
+    void log(LogLevel level, const String& message);
+    void debug(const String& message);
+    void info(const String& message);
+    void warning(const String& message);
+    void error(const String& message);
+#endif
+
+    // One line as the /logs page's live tail expects it over the consumer's /ws:
+    // {"type":"log","color":…,"timestamp":…,"level":…,"message":…}. Pair with setOutputCallback()
+    // to forward lines; the callback runs on the logging task, so hand the send to the server.
+    std::string liveTailJson(LogLevel level, uint32_t timestamp, const char* message) const;
 
     // A copy taken under the lock: the newest maxEntries (0 = all).
     std::vector<LogEntry> getEntries(size_t maxEntries = 0) const;
