@@ -12,7 +12,9 @@
 #include "DeviceCert.h"
 #include "Logger.h"
 #include "esp_ota_ops.h"
+#include "esp_app_format.h"
 #include "esp_timer.h"
+#include "esp_idf_version.h"
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
@@ -38,6 +40,68 @@ bool runningImagePendingVerify() {
     esp_ota_img_states_t state;
     return running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
            state == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+const char* imageStateName(esp_ota_img_states_t state) {
+    switch (state) {
+        case ESP_OTA_IMG_NEW:            return "new";
+        case ESP_OTA_IMG_PENDING_VERIFY: return "pending verify";
+        case ESP_OTA_IMG_VALID:          return "valid";
+        case ESP_OTA_IMG_INVALID:        return "invalid";
+        case ESP_OTA_IMG_ABORTED:        return "aborted";
+        default:                         return "untracked";
+    }
+}
+
+// Reads the SHA-256 esptool appends to the image instead of recomputing it: hashing the whole
+// partition costs ~0.2 s per MB. The digest follows the segments, the checksum byte and its
+// padding to 16 bytes.
+bool readAppendedImageHash(const esp_partition_t* part, uint8_t* out, size_t len) {
+    esp_image_header_t header;
+    if (esp_partition_read(part, 0, &header, sizeof(header)) != ESP_OK ||
+        header.magic != ESP_IMAGE_HEADER_MAGIC || header.segment_count > ESP_IMAGE_MAX_SEGMENTS ||
+        !header.hash_appended) {
+        return false;
+    }
+    size_t offset = sizeof(header);
+    for (uint8_t i = 0; i < header.segment_count; ++i) {
+        esp_image_segment_header_t segment;
+        if (esp_partition_read(part, offset, &segment, sizeof(segment)) != ESP_OK) {
+            return false;
+        }
+        offset += sizeof(segment) + segment.data_len;
+        if (offset >= part->size) {
+            return false;
+        }
+    }
+    offset = (offset + 1 + 15) & ~(size_t)15;
+    return offset + len <= part->size && esp_partition_read(part, offset, out, len) == ESP_OK;
+}
+
+// The hash is the first bytes of the image SHA-256 esptool appends to the .bin (its last 32 bytes),
+// so the log names the exact image running and a rolled-back one shows on the first line.
+void logRunningImage() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    if (!running) {
+        return;
+    }
+    char hash[17] = "unknown";
+    uint8_t sha[8];
+    if (readAppendedImageHash(running, sha, sizeof(sha))) {
+        for (size_t i = 0; i < sizeof(sha); ++i) {
+            snprintf(hash + i * 2, 3, "%02x", sha[i]);
+        }
+    }
+    // A USB flash erases otadata, so the running image carries no state.
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    esp_ota_get_state_partition(running, &state);
+    Logger.info("Firmware %s in %s (%s), IDF %s", hash, running->label, imageStateName(state),
+                esp_get_idf_version());
+
+    const esp_partition_t* rejected = esp_ota_get_last_invalid_partition();
+    if (rejected) {
+        Logger.warning("Rolled back: the image in %s was rejected", rejected->label);
+    }
 }
 
 }  // namespace
@@ -106,6 +170,7 @@ void WiFiSetupManager::begin() {
 
     // Set before anything can fail, so a new image that can't even start WiFi rolls back.
     _beginMs = getMillis();
+    logRunningImage();
     _firmwarePending = runningImagePendingVerify();
     if (_firmwarePending) {
         Logger.warning("New firmware on probation: kept once the device is reachable, rolled back otherwise");

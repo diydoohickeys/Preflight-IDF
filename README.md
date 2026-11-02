@@ -271,6 +271,13 @@ setup portal, from which it can still be repaired — and if that hasn't happene
 `WiFiSetupConfig::rollbackTimeoutMs` (5 minutes) or the image resets first, the bootloader
 returns to the previous one. Without that option the check is a no-op.
 
+`begin()` logs which image is running, e.g. `Firmware 6fdb2f100f637b45 in ota_0 (valid), IDF
+v6.0.1`. The hash is the first 8 bytes of the image SHA-256 esptool appends to the `.bin` (its
+last 32 bytes), so it matches one specific build; the state is `untracked` after a USB flash,
+and always without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
+If a previous update was rolled back, a `Rolled back: the image in <slot> was rejected` warning
+follows.
+
 Pair it with the task watchdog (`CONFIG_ESP_TASK_WDT_PANIC=y`) so a hang becomes a reset. If
 a device still ends up on a bad image, flash it over USB from download mode (hold BOOT while
 connecting) — that path is in ROM and always available.
